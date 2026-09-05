@@ -1,7 +1,5 @@
 # AI Return-Risk Scorer
 
-**Track 02 — AI Risk Manager**
-
 Flags orders likely to end in an abusive or fraudulent return, using only signals available at checkout time — before the return is ever filed.
 
 ## What's here
@@ -46,3 +44,7 @@ See `OBSERVATIONS.md` for more on why the results look the way they do.
 ## Design choice: defense-only
 
 The model scores and routes borderline cases to human review. It never auto-denies a return or takes unilateral action against a customer — a false accusation costs more trust than a missed return costs money.
+
+--
+
+**Track 02 — AI Risk Manager**
