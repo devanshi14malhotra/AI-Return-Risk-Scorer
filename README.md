@@ -45,6 +45,3 @@ See `OBSERVATIONS.md` for more on why the results look the way they do.
 
 The model scores and routes borderline cases to human review. It never auto-denies a return or takes unilateral action against a customer — a false accusation costs more trust than a missed return costs money.
 
---
-
-**Track 02 — AI Risk Manager**
