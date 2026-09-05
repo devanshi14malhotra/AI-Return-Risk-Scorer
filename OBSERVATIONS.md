@@ -1,50 +1,75 @@
 # Observations
 
-## Why the numbers look mediocre — and why that's expected
+## What the current result means
 
-Precision 0.49 / recall 0.40 is not a strong result by production fraud-detection
-standards. That's intentional, and worth understanding rather than hiding.
+The current policy reaches 52.9% recall and 8.8% false-positive rate on the
+untouched test set. Precision is only 30.5%, so most flagged cases are still
+legitimate. This is a useful improvement in customer-impact control, not a
+production fraud-detection result.
 
-The synthetic dataset was generated with a real signal (prior returns, address
-mismatch, device flags, etc.) plus **added Gaussian noise** on top of that signal
-before labeling. The noise is what caps recall around 40% — the model genuinely
-cannot recover a pattern that isn't fully there. This is different from a case
-where the model is bad and the data is clean.
+## Evaluation protocol
 
-## What this does and doesn't prove
+The synthetic dataset contains 5,000 rows. The pipeline trains on 60% of the
+rows, selects the operating threshold on a separate 20% validation split, and
+reports final metrics once on the remaining untouched 20% test split (1,000
+orders). The test set contains 68 abusive cases. This prevents threshold
+selection from quietly overfitting the final reported result.
 
-**It doesn't prove:** that this exact model, with this exact performance, would
-work on real order/return data. We have no real data to test that claim.
+The synthetic abusive-return rate is 6.84%, closer to a rare-event setting than
+the previous 31% benchmark, but it is still not a measured Razorpay rate.
+The test set has only 68 positive cases, so the reported metrics have sampling
+uncertainty and should not be treated as production estimates.
 
-**It does prove:** the pipeline is real and complete — training, held-out
-evaluation, honest metric reporting (including false-positive cost), SHAP
-explainability, and a defense-only routing decision (review vs. process) instead
-of an automatic action.
+## Why synthetic data is still limited
 
-## On "does synthetic noise mimic real-world noise"
+The labels come from a hand-designed probabilistic process with Gaussian noise.
+That creates a learnable benchmark, but it does not recreate real return abuse.
+Real data would include missing values, label disputes, correlated signals,
+seasonality, merchant differences, and adversarial adaptation.
 
-Be careful with this claim in a pitch — it's easy to overstate. Gaussian noise
-added to a hand-designed logistic function is a reasonable *stand-in* for the
-fact that real-world fraud signals are imperfect and probabilistic, not
-deterministic. But real fraud data has properties this simulation does not
-capture:
+The synthetic feature distribution also has assumptions that need replacement
+before deployment. For example, device/IP history and payment risk are treated
+as clean numeric signals, while real systems would need identity, privacy,
+data-quality, and governance controls around them.
 
-- **Class imbalance** far more extreme than the ~31% synthetic base rate here —
-  real abusive-return rates are typically much lower single digits.
-- **Adversarial adaptation** — real fraud patterns shift over time as bad actors
-  learn what gets flagged; synthetic noise is static.
-- **Correlated, non-random noise** — real-world "noise" often comes from missing
-  or mislabeled data, not a clean random distribution.
+## Policy choice
 
-The honest claim is: *"the noise demonstrates the model can't achieve perfect
-separation on ambiguous cases, which is realistic in spirit"* — not *"this noise
-mimics real-world fraud data."* The former is defensible under questioning; the
-latter isn't, and a judge with any ML background may push on exactly this point.
+The policy selects a 15% probability threshold on validation data by maximizing
+recall while keeping the validation false-positive rate at or below 10%. On the
+untouched test set this produced 52.9% recall, 8.8% false-positive rate, and
+30.5% precision. The 10% guardrail is a demonstration operating assumption and
+must be replaced with merchant estimates in a real deployment.
 
-## If there were more time
+The threshold is not universally optimal. It is optimal only for the stated
+validation guardrail and this synthetic split. The dashboard intentionally lets
+the user move it and inspect the resulting customer-impact tradeoff.
 
-The single highest-leverage next step would be lowering the injected noise
-(from `rng.normal(0, 0.5, ...)` to something like `0.15` in
-`return_risk_scorer.py`) to see how much of the recall ceiling is noise-driven
-versus model-driven — and, ideally, testing against any real (even small,
-anonymized) return/chargeback dataset if one becomes available.
+## Model selection and explainability
+
+Calibrated logistic regression, RandomForest, Gradient Boosting, and histogram
+Gradient Boosting candidates were compared under the same development protocol.
+Histogram Gradient Boosting was retained because it captured nonlinear
+interactions better under the recall-at-10%-false-positive-rate objective. The
+final test set was not used to choose the model or threshold.
+
+SHAP explanations and feature ablation are included because the retained model
+is less directly interpretable than logistic regression. Ablation replaces one
+feature at a time with its median and measures the policy F1 change. It is a
+dependency check, not proof of causality.
+
+## What this does and does not prove
+
+**It does not prove:** that this model, this threshold, or these metrics would
+work on real order/return data.
+
+**It does demonstrate:** a reproducible training pipeline, calibrated scoring,
+validation-only policy selection, untouched-test reporting, customer-impact
+guardrails, SHAP explanations, counterfactual checks, robustness analysis, and
+defense-only human-review routing.
+
+## Next validation step
+
+Before making a production claim, run repeated time-based evaluation on a real
+or anonymized return/chargeback dataset. Report confidence intervals, missing
+data behavior, calibration by merchant segment, and performance drift over
+time. No further synthetic tuning should be described as real-world lift.

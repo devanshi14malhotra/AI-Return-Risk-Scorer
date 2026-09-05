@@ -14,93 +14,56 @@ since we don't have real Razorpay order/return data for this build.
 import numpy as np
 import pandas as pd
 import streamlit as st
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import precision_score, recall_score, f1_score, confusion_matrix
-import shap
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from return_risk_core import (
+    FEATURE_ORDER,
+    counterfactuals,
+    evaluate_threshold,
+    feature_ablation,
+    shap_values_for,
+    select_policy,
+    threshold_sweep,
+    train_pipeline,
+)
 
 st.set_page_config(page_title="Return-Risk Scorer", layout="centered")
 
-FEATURE_ORDER = [
-    "order_value",
-    "customer_account_age_days",
-    "prior_return_count",
-    "prior_order_count",
-    "delivery_to_return_request_days",
-    "payment_method_risk_score",
-    "shipping_billing_mismatch",
-    "device_ip_flagged_before",
-]
-
-# -----------------------------
-# Train once, cache the real model + data
-# -----------------------------
 @st.cache_resource
-def train_model():
-    rng = np.random.default_rng(42)
-    N = 800
-
-    df = pd.DataFrame({
-        "order_value": rng.gamma(shape=2.0, scale=800, size=N).round(2),
-        "customer_account_age_days": rng.integers(0, 1500, size=N),
-        "prior_return_count": rng.poisson(0.6, size=N),
-        "prior_order_count": rng.integers(1, 50, size=N),
-        "delivery_to_return_request_days": rng.integers(0, 30, size=N),
-        "payment_method_risk_score": rng.uniform(0, 1, size=N),
-        "shipping_billing_mismatch": rng.integers(0, 2, size=N),
-        "device_ip_flagged_before": rng.integers(0, 2, size=N),
-    })
-
-    risk_logit = (
-        -3.0
-        + 2.2 * df["prior_return_count"].clip(upper=5) / 5
-        + 1.5 * df["shipping_billing_mismatch"]
-        + 1.8 * df["device_ip_flagged_before"]
-        + 1.2 * df["payment_method_risk_score"]
-        - 0.8 * (df["customer_account_age_days"] / 1500)
-        - 0.5 * (df["prior_order_count"] / 50)
-        + 0.6 * (df["delivery_to_return_request_days"] < 2).astype(int)
-        + rng.normal(0, 0.5, size=N)
-    )
-    prob = 1 / (1 + np.exp(-risk_logit))
-    df["is_abusive_return"] = (rng.uniform(0, 1, size=N) < prob).astype(int)
-
-    X = df[FEATURE_ORDER]
-    y = df["is_abusive_return"]
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.25, stratify=y, random_state=42
-    )
-
-    clf = RandomForestClassifier(
-        n_estimators=300, max_depth=6, min_samples_leaf=5,
-        class_weight="balanced", random_state=42
-    )
-    clf.fit(X_train, y_train)
-
-    explainer = shap.TreeExplainer(clf)
-    shap_values_test = explainer.shap_values(X_test)
-    if isinstance(shap_values_test, list):
-        sv = shap_values_test[1]
-    elif isinstance(shap_values_test, np.ndarray) and shap_values_test.ndim == 3:
-        sv = shap_values_test[:, :, 1]
-    else:
-        sv = shap_values_test
-
-    return clf, explainer, X_train, X_test, y_train, y_test, sv
+def load_pipeline():
+    return train_pipeline()
 
 
-clf, explainer, X_train, X_test, y_train, y_test, shap_values_test = train_model()
+pipeline = load_pipeline()
+clf = pipeline["model"]
+explanation_model = pipeline["explanation_model"]
+X_test = pipeline["X_test"]
+y_test = pipeline["y_test"]
+X_validation = pipeline["X_validation"]
+y_validation = pipeline["y_validation"]
+shap_values_test = shap_values_for(explanation_model, X_test)
 
-y_pred = clf.predict(X_test)
 y_proba = clf.predict_proba(X_test)[:, 1]
+validation_probabilities = clf.predict_proba(X_validation)[:, 1]
 
-precision = precision_score(y_test, y_pred)
-recall = recall_score(y_test, y_pred)
-f1 = f1_score(y_test, y_pred)
-tn, fp, fn, tp = confusion_matrix(y_test, y_pred).ravel()
+st.sidebar.header("Evaluation settings")
+decision_threshold = st.sidebar.slider(
+    "Abusive-return threshold",
+    min_value=0.10,
+    max_value=0.90,
+    value=0.15,
+    step=0.05,
+    help="Orders at or above this calibrated probability enter the review policy.",
+)
+y_pred = (y_proba >= decision_threshold).astype(int)
+
+metrics = evaluate_threshold(y_test, y_proba, decision_threshold)
+precision = metrics["precision"]
+recall = metrics["recall"]
+f1 = metrics["f1"]
+tn, fp, fn, tp = metrics["tn"], metrics["fp"], metrics["fn"], metrics["tp"]
+flagged_rate = metrics["flagged_rate"]
 
 # -----------------------------
 # Header
@@ -119,11 +82,16 @@ st.info(
 # Metrics
 # -----------------------------
 st.subheader("Held-out test performance")
-c1, c2, c3, c4 = st.columns(4)
+st.caption(
+    f"Metrics at a {decision_threshold:.0%} model threshold. Changing this cutoff "
+    "trades missed abusive returns for fewer false accusations."
+)
+c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("Precision", f"{precision:.2f}")
 c2.metric("Recall", f"{recall:.2f}")
 c3.metric("F1", f"{f1:.2f}")
 c4.metric("Test orders", f"{len(y_test)}")
+c5.metric("Flagged at threshold", f"{flagged_rate:.1%}")
 
 st.subheader("Confusion matrix")
 cm_df = pd.DataFrame(
@@ -157,6 +125,39 @@ ax.barh(mean_abs_shap.index, mean_abs_shap.values, color="#c98a3e")
 ax.set_xlabel("mean |SHAP value|")
 fig.tight_layout()
 st.pyplot(fig)
+
+# -----------------------------
+# Policy economics and robustness
+# -----------------------------
+st.subheader("Policy tradeoff: customer impact vs. missed abuse")
+st.caption(
+    "Illustrative unit costs: a false accusation costs 1, a missed abusive return "
+    "costs 2, and sending a case to review costs 0.1. These are not business claims."
+)
+policy_table = threshold_sweep(y_validation, validation_probabilities)
+best_policy = select_policy(y_validation, validation_probabilities)
+policy_chart = policy_table.set_index("threshold")[["expected_cost"]]
+st.line_chart(policy_chart)
+st.info(
+    f"Validation-selected threshold: {best_policy['threshold']:.0%}. "
+    f"Validation recall is {best_policy['recall']:.1%} at a "
+    f"{best_policy['false_positive_rate']:.1%} false-positive rate; "
+    "the policy guardrail is 10%."
+)
+
+st.subheader("Robustness: what happens when one signal disappears?")
+st.caption(
+    "Each feature is replaced with its training median. The F1 drop estimates how "
+    "dependent the model is on that signal; it is not a causal claim."
+)
+ablation_table = feature_ablation(clf, X_test, y_test, decision_threshold)
+st.dataframe(
+    ablation_table[["feature", "f1_without_signal", "f1_drop"]].rename(
+        columns={"f1_without_signal": "F1 after ablation", "f1_drop": "F1 drop"}
+    ),
+    hide_index=True,
+    width="stretch",
+)
 
 # -----------------------------
 # Live scoring — REAL model inference
@@ -200,17 +201,45 @@ else:
     st.success("Process normally — no meaningful risk signal.")
 
 # Per-order SHAP explanation for this exact input — also real
-row_shap = explainer.shap_values(input_row)
-if isinstance(row_shap, list):
-    row_sv = row_shap[1][0]
-elif isinstance(row_shap, np.ndarray) and row_shap.ndim == 3:
-    row_sv = row_shap[0, :, 1]
-else:
-    row_sv = row_shap[0]
+row_sv = shap_values_for(explanation_model, input_row)[0]
 
 st.caption("Why the model scored it this way (this order's own SHAP contributions):")
 contrib = pd.Series(row_sv, index=FEATURE_ORDER).sort_values(key=abs, ascending=False)
-st.bar_chart(contrib)
+fig, ax = plt.subplots(figsize=(8, 4.5))
+colors = ["#ef6a6a" if value > 0 else "#59c3c3" for value in contrib.values]
+bars = ax.barh(contrib.index, contrib.values, color=colors)
+ax.axvline(0, color="#777777", linewidth=1)
+ax.set_xlabel("SHAP contribution to abusive-return risk")
+ax.set_title("Why this order received its risk score")
+ax.tick_params(axis="y", labelsize=9)
+for bar, value in zip(bars, contrib.values):
+    offset = 0.01 if value >= 0 else -0.01
+    alignment = "left" if value >= 0 else "right"
+    ax.text(
+        value + offset,
+        bar.get_y() + bar.get_height() / 2,
+        f"{value:+.3f}",
+        va="center",
+        ha=alignment,
+        fontsize=8,
+    )
+fig.tight_layout()
+st.pyplot(fig)
+
+st.caption("Counterfactual checks: one plausible change at a time")
+counterfactual_table = counterfactuals(clf, input_row)
+st.dataframe(
+    counterfactual_table.rename(
+        columns={
+            "current_value": "Current",
+            "alternative_value": "Alternative",
+            "risk_change": "Risk change",
+            "new_risk": "New risk",
+        }
+    ),
+    hide_index=True,
+    width="stretch",
+)
 
 st.divider()
 st.caption(
